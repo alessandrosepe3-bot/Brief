@@ -497,30 +497,20 @@ async function doFetch() {
   spinning(true); setSt('go','Fetching…'); progShow(true); progSet(10);
 
   try {
-    progSet(25);
+    // Step 1 — fetch RSS directly via Cloudflare Worker (no AI call needed)
+    setSt('go', 'Fetching timeline…');
+    const proxyRssUrl = API_URL.replace(/\/+$/, '') + '?rss=' + encodeURIComponent(rssUrl);
+    const rssResp = await fetch(proxyRssUrl);
+    if (!rssResp.ok) throw new Error('Could not reach Nitter. Try a different instance.');
+    const rawXml = await rssResp.text();
+    progSet(40);
 
-    // Step 1 — ask Claude to fetch the RSS and extract tweets
-    setSt('go', 'Reading timeline…');
-    const fetchResp = await claudeCall(api, [
-      { role:'user', content:
-        `Please fetch the RSS feed at this URL and return the raw XML content: ${rssUrl}\n\nUse your web_search or any available tool to retrieve it. Return ONLY the raw XML, nothing else.`
-      }
-    ], true /* enable web_search tool */);
-
-    progSet(55);
-    const rawXml = fetchResp.trim();
-
-    // parse RSS from Claude's response
     const tweets = parseRSS(rawXml);
+    if (!tweets.length) throw new Error(`No tweets found from "${nitter}". Try a different Nitter instance.`);
 
-    // If Claude couldn't fetch it, rawXml won't contain <item> tags
-    if (!tweets.length) {
-      throw new Error(`Nitter instance "${nitter}" didn't return any tweets. Try a different instance in Settings.`);
-    }
-
-    // Step 2 — ask Claude to summarise
+    // Step 2 — ONE Gemini call to summarise (no rate limit issues)
     setSt('go', `Summarising ${tweets.length} tweets…`);
-    progSet(70);
+    progSet(55);
 
     const dump = tweets.map((t,i) =>
       `[${i+1}] @${t.author}: "${t.text.slice(0,260)}"`
@@ -549,7 +539,7 @@ TWEETS:\n${dump}`
       const clean = briefResp.replace(/```json|```/g,'').trim();
       briefings = JSON.parse(clean);
     } catch {
-      throw new Error('Could not parse Claude\'s response. Please try again.');
+      throw new Error('Could not parse response. Please try again.');
     }
 
     all = briefings;
