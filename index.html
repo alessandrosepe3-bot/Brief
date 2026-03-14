@@ -321,12 +321,12 @@ header{
 
     <div class="field">
       <div class="lbl"><span class="lbl-dot"></span>Anthropic API Key</div>
-      <input class="inp" id="iApi" type="password" placeholder="AIza… (Google AI Studio key)" autocorrect="off" autocapitalize="none" spellcheck="false">
+      <input class="inp" id="iApi" type="password" placeholder="sk-ant-api03-…" autocorrect="off" autocapitalize="none" spellcheck="false">
     </div>
 
     <div class="api-hint">
-      Get a free key at <strong>aistudio.google.com → Get API Key. Completely free, no credit card needed.<br>
-      100% free — Google gives 1500 requests/day at no cost.
+      Get a free key at <strong>console.anthropic.com</strong> → API Keys → Create Key.<br>
+      The free tier has enough credits for hundreds of briefings.
     </div>
 
     <div class="field">
@@ -391,8 +391,8 @@ header{
 // ───────────────────────────────
 //  CONSTANTS
 // ───────────────────────────────
-const API_URL = 'https://brief-proxy.alessandro-sepe-3.workers.dev';
-const MODEL = 'gemini-2.5-flash';
+const API_URL = 'https://api.anthropic.com/v1/messages';
+const MODEL   = 'claude-sonnet-4-20250514';
 
 const TOPIC_MAP = {
   'AI & Tech':     {cls:'t-ai',  e:'🤖'},
@@ -497,20 +497,30 @@ async function doFetch() {
   spinning(true); setSt('go','Fetching…'); progShow(true); progSet(10);
 
   try {
-    // Step 1 — fetch RSS directly via Cloudflare Worker (no AI call needed)
-    setSt('go', 'Fetching timeline…');
-    const proxyRssUrl = API_URL.replace(/\/+$/, '') + '?rss=' + encodeURIComponent(rssUrl);
-    const rssResp = await fetch(proxyRssUrl);
-    if (!rssResp.ok) throw new Error('Could not reach Nitter. Try a different instance.');
-    const rawXml = await rssResp.text();
-    progSet(40);
+    progSet(25);
 
-    const tweets = parseRSS(rawXml);
-    if (!tweets.length) throw new Error(`No tweets found from "${nitter}". Try a different Nitter instance.`);
+    // Step 1 — ask Claude to fetch the RSS and extract tweets
+    setSt('go', 'Reading timeline…');
+    const fetchResp = await claudeCall(api, [
+      { role:'user', content:
+        `Please fetch the RSS feed at this URL and return the raw XML content: ${rssUrl}\n\nUse your web_search or any available tool to retrieve it. Return ONLY the raw XML, nothing else.`
+      }
+    ], true /* enable web_search tool */);
 
-    // Step 2 — ONE Gemini call to summarise (no rate limit issues)
-    setSt('go', `Summarising ${tweets.length} tweets…`);
     progSet(55);
+    const rawXml = fetchResp.trim();
+
+    // parse RSS from Claude's response
+    const tweets = parseRSS(rawXml);
+
+    // If Claude couldn't fetch it, rawXml won't contain <item> tags
+    if (!tweets.length) {
+      throw new Error(`Nitter instance "${nitter}" didn't return any tweets. Try a different instance in Settings.`);
+    }
+
+    // Step 2 — ask Claude to summarise
+    setSt('go', `Summarising ${tweets.length} tweets…`);
+    progSet(70);
 
     const dump = tweets.map((t,i) =>
       `[${i+1}] @${t.author}: "${t.text.slice(0,260)}"`
@@ -539,7 +549,7 @@ TWEETS:\n${dump}`
       const clean = briefResp.replace(/```json|```/g,'').trim();
       briefings = JSON.parse(clean);
     } catch {
-      throw new Error('Could not parse response. Please try again.');
+      throw new Error('Could not parse Claude\'s response. Please try again.');
     }
 
     all = briefings;
@@ -560,37 +570,48 @@ TWEETS:\n${dump}`
 }
 
 // ───────────────────────────────
-//  GEMINI API CALL
+//  CLAUDE API CALL
 // ───────────────────────────────
 async function claudeCall(apiKey, messages, useWebSearch) {
-  const contents = messages.map(m => ({
-    role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }]
-  }));
   const body = {
-    contents,
-    generationConfig: { maxOutputTokens: useWebSearch ? 4000 : 2000 },
+    model: MODEL,
+    max_tokens: 1000,
+    messages,
   };
+
   if (useWebSearch) {
-    body.tools = [{ google_search: {} }];
+    body.tools = [{ type: 'web_search_20250305', name: 'web_search' }];
+    body.max_tokens = 4000; // more room for tool use
   }
+
   const r = await fetch(API_URL, {
-    method: "POST",
+    method: 'POST',
     headers: {
-      "Content-Type": "application/json",
-      "X-Gemini-Key": apiKey,
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
     },
     body: JSON.stringify(body),
   });
+
   if (!r.ok) {
     const e = await r.json().catch(() => ({}));
     const msg = e.error?.message || r.statusText;
-    if (r.status === 400) throw new Error("Invalid API key. Get one free at aistudio.google.com");
-    if (r.status === 429) throw new Error("Rate limit hit. Wait a moment and try again.");
+    if (r.status === 401) throw new Error('Invalid API key. Check your key in Settings.');
+    if (r.status === 429) throw new Error('Rate limit hit. Wait a moment and try again.');
     throw new Error(`API error (${r.status}): ${msg}`);
   }
+
   const data = await r.json();
-  return data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+
+  // collect all text blocks (tool_result content is embedded too)
+  const texts = (data.content || [])
+    .filter(b => b.type === 'text')
+    .map(b => b.text)
+    .join('');
+
+  return texts;
 }
 
 // ───────────────────────────────
