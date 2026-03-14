@@ -317,7 +317,7 @@ header{
   <div class="sh-box">
     <div class="sh-handle"></div>
     <div class="sh-title">Setup Bri<i>ef.</i></div>
-    <div class="sh-desc">Your API key stays on your device. The app asks Claude to fetch and summarise your timeline — no proxy, no server needed.</div>
+    <div class="sh-desc">Enter your API key and the accounts you want to follow. Claude fetches their latest tweets and turns them into briefings.</div>
 
     <div class="field">
       <div class="lbl"><span class="lbl-dot"></span>Anthropic API Key</div>
@@ -325,27 +325,16 @@ header{
     </div>
 
     <div class="api-hint">
-      Get a free key at <strong>console.anthropic.com</strong> → API Keys → Create Key.<br>
-      The free tier has enough credits for hundreds of briefings.
+      Get a free key at <strong>console.anthropic.com</strong> → API Keys → Create Key.
     </div>
 
     <div class="field">
-      <div class="lbl"><span class="lbl-dot"></span>Your X / Twitter Username</div>
-      <input class="inp" id="iUser" type="text" placeholder="@yourhandle" autocorrect="off" autocapitalize="none">
+      <div class="lbl"><span class="lbl-dot"></span>Accounts to Follow</div>
+      <textarea class="inp" id="iAccounts" rows="4" placeholder="nytimes, bbcworld, NASA..." autocorrect="off" autocapitalize="none" style="resize:none;height:110px;line-height:1.6"></textarea>
+      <div style="font-size:11px;color:var(--sub);margin-top:5px">Comma-separated usernames. No @ needed. Up to 15 accounts per fetch.</div>
     </div>
 
-    <div class="field">
-      <div class="lbl"><span class="lbl-dot"></span>Nitter Instance</div>
-      <input class="inp" id="iNitter" type="text" placeholder="nitter.poast.org" autocorrect="off" autocapitalize="none">
-      <div class="presets">
-        <button class="pre" onclick="setN('nitter.poast.org')">nitter.poast.org</button>
-        <button class="pre" onclick="setN('nitter.privacydev.net')">nitter.privacydev.net</button>
-        <button class="pre" onclick="setN('nitter.cz.ht')">nitter.cz.ht</button>
-        <button class="pre" onclick="setN('nitter.1d4.us')">nitter.1d4.us</button>
-      </div>
-    </div>
-
-    <button class="go-btn" onclick="startReal()">Fetch My Timeline →</button>
+    <button class="go-btn" onclick="startReal()">Fetch My Feed →</button>
     <button class="demo-btn" onclick="startDemo()">👀 Try demo data first</button>
   </div>
 </div>
@@ -437,12 +426,11 @@ window.addEventListener('DOMContentLoaded', () => {
       clearInterval(t);
       setTimeout(() => {
         document.getElementById('splash').classList.add('out');
-        const api  = S.get('b_api');
-        const user = S.get('b_user');
-        if (api && user) {
-          document.getElementById('iApi').value    = api;
-          document.getElementById('iUser').value   = user;
-          document.getElementById('iNitter').value = S.get('b_nitter') || 'nitter.poast.org';
+        const api      = S.get('b_api');
+        const accounts = S.get('b_accounts');
+        if (api && accounts) {
+          document.getElementById('iApi').value      = api;
+          document.getElementById('iAccounts').value = accounts || 'NYUfasecon, nberpubs, cepr_org, EJ_RES, Inter, AndreaGiuricin, drelegantia, ecofinitalia, NonaMikhelidze, brusco_sandro, Phastidio, jacopo_iacoboni, LaStampa, davcarretta, RadioRadicale, ilfoglio_it, lucianocapone, CarloStagnaro, martaottaviani, HSkelsen, emmevilla, ispionline, carloalberto, DeShindig, ilario82, RaiNews, Scacciavillani, GiovaQuez, QSanit, lorepregliasco, you_trend, Unibo, rep_torino, Mondadori, ComVentotene, silupescu, Ivan_Grieco, MarcoFattorini, putino, FocusAmerica_it, fanpage, OGiannino, ShooterHatesYou, AvvocatoAtomico, micheleboldrin, SpencerHakimian, NASA, ninabecks1, liberalismorg, MKhamenei_ir';
         } else {
           setTimeout(openSheet, 500);
         }
@@ -459,12 +447,12 @@ function closeSheet(){ document.getElementById('sheet').classList.remove('on') }
 function setN(v)     { document.getElementById('iNitter').value = v }
 
 function startReal() {
-  const api    = document.getElementById('iApi').value.trim();
-  const user   = document.getElementById('iUser').value.replace('@','').trim();
-  const nitter = document.getElementById('iNitter').value.trim() || 'nitter.poast.org';
-  if (!api)  { alert('Please enter your Anthropic API key.'); return }
-  if (!user) { alert('Please enter your X username.'); return }
-  S.set('b_api', api); S.set('b_user', user); S.set('b_nitter', nitter);
+  const api      = document.getElementById('iApi').value.trim();
+  const accounts = document.getElementById('iAccounts').value.trim();
+  if (!api)      { alert('Please enter your Anthropic API key.'); return }
+  if (!accounts) { alert('Please enter at least one account to follow.'); return }
+  S.set('b_api', api);
+  S.set('b_accounts', accounts.replace(/@/g,''));
   closeSheet();
   mode = 'real';
   doFetch();
@@ -483,73 +471,97 @@ function refresh() {
 }
 
 // ───────────────────────────────
-//  CORE — ask Claude to fetch+summarise in ONE call
-//  Uses web_search tool so Claude fetches the RSS server-side.
-//  Zero browser-side proxy needed.
+//  CORE — fetch multiple accounts + summarise
 // ───────────────────────────────
-async function doFetch() {
-  const api    = S.get('b_api');
-  const user   = S.get('b_user');
-  const nitter = S.get('b_nitter') || 'nitter.poast.org';
-  const base   = nitter.startsWith('http') ? nitter : 'https://' + nitter;
-  const rssUrl = `${base}/${user}/rss`;
+const NITTER_INSTANCES = [
+  'https://xcancel.com',
+  'https://nitter.poast.org',
+  'https://nitter.privacyredirect.com',
+  'https://lightbrd.com',
+  'https://nitter.net',
+];
 
-  spinning(true); setSt('go','Fetching…'); progShow(true); progSet(10);
+async function doFetch() {
+  const api      = S.get('b_api');
+  const accounts = (S.get('b_accounts') || '').split(',').map(a => a.trim()).filter(Boolean);
+
+  if (!accounts.length) { openSheet(); return; }
+
+  spinning(true); setSt('go','Fetching…'); progShow(true); progSet(5);
 
   try {
-    progSet(25);
+    // Fetch up to 15 accounts in parallel, 3 tweets each
+    const batch = accounts.slice(0, 15);
+    setSt('go', `Fetching ${batch.length} accounts…`);
 
-    // Step 1 — ask Claude to fetch the RSS and extract tweets
-    setSt('go', 'Reading timeline…');
+    const rssUrls = batch.map(u => {
+      const instance = NITTER_INSTANCES[Math.floor(Math.random() * NITTER_INSTANCES.length)];
+      return `${instance}/${u}/rss`;
+    });
+
+    // Ask Claude to fetch all RSS feeds in one call
+    const urlList = rssUrls.map((u,i) => `${i+1}. ${u}`).join('\n');
+    progSet(20);
+
+    setSt('go', 'Reading feeds…');
     const fetchResp = await claudeCall(api, [
-      { role:'user', content:
-        `Please fetch the RSS feed at this URL and return the raw XML content: ${rssUrl}\n\nUse your web_search or any available tool to retrieve it. Return ONLY the raw XML, nothing else.`
+      { role: 'user', content:
+        `Fetch these Nitter RSS feeds and extract the latest tweets from each. For each feed get up to 5 recent tweets. Return ONLY a JSON array of tweet objects with fields: author (username), text (tweet text max 200 chars). No markdown, no explanation.
+
+RSS feeds to fetch:
+${urlList}
+
+If a feed fails, skip it and continue with the others. Return as many tweets as you can find.`
       }
-    ], true /* enable web_search tool */);
+    ], true);
 
-    progSet(55);
-    const rawXml = fetchResp.trim();
+    progSet(65);
 
-    // parse RSS from Claude's response
-    const tweets = parseRSS(rawXml);
-
-    // If Claude couldn't fetch it, rawXml won't contain <item> tags
-    if (!tweets.length) {
-      throw new Error(`Nitter instance "${nitter}" didn't return any tweets. Try a different instance in Settings.`);
+    // Parse tweets from Claude's response
+    let tweets = [];
+    try {
+      const clean = fetchResp.replace(/```json|```/g,'').trim();
+      // Find JSON array in response
+      const match = clean.match(/\[\s*\{[\s\S]*\}\s*\]/);
+      if (match) tweets = JSON.parse(match[0]);
+    } catch(e) {
+      console.warn('Tweet parse error', e);
     }
 
-    // Step 2 — ask Claude to summarise
+    if (!tweets.length) throw new Error('Could not fetch any tweets. All Nitter instances may be down. Try again in a few minutes.');
+
     setSt('go', `Summarising ${tweets.length} tweets…`);
-    progSet(70);
+    progSet(75);
 
     const dump = tweets.map((t,i) =>
-      `[${i+1}] @${t.author}: "${t.text.slice(0,260)}"`
+      `[${i+1}] @${t.author}: "${(t.text||'').slice(0,200)}"`
     ).join('\n');
 
     const briefResp = await claudeCall(api, [
-      { role:'user', content:
-        `You are a news briefing AI. Group these tweets into thematic briefings and return ONLY valid JSON — no markdown, no explanation.
+      { role: 'user', content:
+        `You are a news briefing AI. Group these tweets into thematic briefings and return ONLY valid JSON array — no markdown, no explanation.
 
 Each object must have:
 - "topic": one of "AI & Tech","Politics","Sports","Finance","World News","Science","Entertainment","Other"
 - "headline": punchy headline max 10 words
 - "summary": 2-3 sentences with specific facts/names
 - "tweetCount": integer
-- "sources": array of {handle, name} up to 5
-- "keyTweets": array of up to 3 {author, handle, text (max 90 chars)}
+- "sources": array of {handle,name} up to 5
+- "keyTweets": array of up to 3 {author,handle,text (max 90 chars)}
 
-TWEETS:\n${dump}`
+TWEETS:
+${dump}`
       }
     ], false);
 
-    progSet(90);
+    progSet(92);
 
     let briefings;
     try {
       const clean = briefResp.replace(/```json|```/g,'').trim();
       briefings = JSON.parse(clean);
     } catch {
-      throw new Error('Could not parse Claude\'s response. Please try again.');
+      throw new Error('Could not parse response. Please try again.');
     }
 
     all = briefings;
